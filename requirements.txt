@@ -1,0 +1,7 @@
+pyrealsense2>=2.55.0
+mediapipe>=0.10.14
+opencv-python>=4.9.0
+numpy>=1.26.0
+pytest>=8.0.0
+mypy>=1.8.0
+ruff>=0.3.0

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Model binary files
+models/*.task
+
+# Output / results
+results/
+output_*.avi
+
+# Caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Claude Code
+.claude/
