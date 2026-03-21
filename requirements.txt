@@ -1,4 +1,4 @@
-pyrealsense2>=2.55.0
+pyrealsense2==2.54.1.5216  # L515は2.55以降で非対応。2.54.1を使用すること
 mediapipe>=0.10.14
 opencv-python>=4.9.0
 numpy>=1.26.0
