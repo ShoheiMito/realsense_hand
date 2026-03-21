@@ -4,10 +4,18 @@ Usage:
     python -m src.main [options]
 
 Options:
+    --no-pose         Disable pose estimation.
+    --no-hand         Disable hand detection.
     --no-expression   Disable expression recognition (reduces CPU load).
     --no-3d           Disable 3D coordinate HUD overlay.
     --resolution WxH  Override camera resolution (e.g. 1280x720).
     --record          Save annotated output to a timestamped .avi file.
+
+Runtime keyboard controls:
+    p   Toggle pose estimation on/off
+    h   Toggle hand detection on/off
+    f   Toggle face/expression on/off
+    q   Quit
 """
 
 from __future__ import annotations
@@ -24,13 +32,23 @@ import cv2
 
 from src import config
 from src.camera import FrameData, camera_thread
-from src.processor import ProcessingResult, processing_thread
+from src.processor import FeatureFlags, ProcessingResult, processing_thread
 from src.visualizer import PoseVisualizer
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="RealSense L515 real-time 3D pose estimation and expression recognition."
+    )
+    parser.add_argument(
+        "--no-pose",
+        action="store_true",
+        help="Disable pose estimation.",
+    )
+    parser.add_argument(
+        "--no-hand",
+        action="store_true",
+        help="Disable hand detection.",
     )
     parser.add_argument(
         "--no-expression",
@@ -86,10 +104,11 @@ def _print_display_report(buf: list[dict[str, float]]) -> None:
     budget_ms = 1000.0 / 30.0
     steps: list[tuple[str, str]] = [
         ("draw_skeleton", "7. Draw Skeleton     "),
-        ("draw_3d",       "8. Draw 3D Info      "),
-        ("draw_expr",     "9. Draw Expression   "),
-        ("draw_fps",      "10. Draw FPS          "),
-        ("imshow",        "11. cv2.imshow         "),
+        ("draw_hands",    "8. Draw Hands        "),
+        ("draw_3d",       "9. Draw 3D Info      "),
+        ("draw_expr",     "10. Draw Expression   "),
+        ("draw_fps",      "11. Draw FPS          "),
+        ("imshow",        "12. cv2.imshow         "),
     ]
     print(  # noqa: T201
         f"\n{'─' * 62}\n"
@@ -139,9 +158,16 @@ def main() -> None:
             logger.error("%s", exc)
             sys.exit(1)
 
-    # --- Expression recognition toggle (config patch before threads start) --
+    # --- Feature flags (thread-safe toggles) --------------------------------
+    feature_flags = FeatureFlags()
+    if args.no_pose:
+        feature_flags.pose.clear()
+        logger.info("Pose estimation disabled.")
+    if args.no_hand:
+        feature_flags.hand.clear()
+        logger.info("Hand detection disabled.")
     if args.no_expression:
-        config.EXPRESSION_SKIP_FRAMES = 10**9  # effectively disabled
+        feature_flags.expression.clear()
         logger.info("Expression recognition disabled.")
 
     # --- Shared queues and stop event ----------------------------------------
@@ -167,7 +193,7 @@ def main() -> None:
     )
     proc_thread = threading.Thread(
         target=processing_thread,
-        args=(frame_queue, result_queue, stop_event),
+        args=(frame_queue, result_queue, stop_event, feature_flags),
         name="ProcessingThread",
         daemon=True,
     )
@@ -196,7 +222,6 @@ def main() -> None:
     # --- Main-thread display loop --------------------------------------------
     visualizer = PoseVisualizer()
     show_3d = not args.no_3d
-    show_expression = not args.no_expression
 
     display_fps: float = 0.0
     display_fps_count: int = 0
@@ -206,7 +231,9 @@ def main() -> None:
     _disp_buf: list[dict[str, float]] = []
     _DISP_REPORT_INTERVAL = 100
 
-    logger.info("Display loop started. Press 'q' or Ctrl+C to quit.")
+    logger.info(
+        "Display loop started. Press 'q' to quit, 'p'/'h'/'f' to toggle features."
+    )
 
     try:
         while not stop_event.is_set():
@@ -236,12 +263,17 @@ def main() -> None:
                     img = visualizer.draw_skeleton(img, kpts)
                     _dt["draw_skeleton"] = (time.perf_counter() - _t0) * 1000.0
 
+                if result.hands is not None:
+                    _t0 = time.perf_counter()
+                    img = visualizer.draw_hands(img, result.hands)
+                    _dt["draw_hands"] = (time.perf_counter() - _t0) * 1000.0
+
                 if show_3d and result.keypoints_3d is not None:
                     _t0 = time.perf_counter()
                     img = visualizer.draw_3d_info(img, result.keypoints_3d)
                     _dt["draw_3d"] = (time.perf_counter() - _t0) * 1000.0
 
-                if show_expression:
+                if feature_flags.expression.is_set():
                     _t0 = time.perf_counter()
                     img = visualizer.draw_expression(img, result.expression)
                     _dt["draw_expr"] = (time.perf_counter() - _t0) * 1000.0
@@ -249,6 +281,9 @@ def main() -> None:
                 _t0 = time.perf_counter()
                 img = visualizer.draw_fps(img, display_fps)
                 _dt["draw_fps"] = (time.perf_counter() - _t0) * 1000.0
+
+                # Feature status HUD
+                img = visualizer.draw_feature_status(img, feature_flags)
 
                 _t0 = time.perf_counter()
                 cv2.imshow(config.WINDOW_NAME, img)
@@ -279,6 +314,27 @@ def main() -> None:
                 logger.info("'q' pressed — stopping.")
                 stop_event.set()
                 break
+            elif key == ord("p"):
+                if feature_flags.pose.is_set():
+                    feature_flags.pose.clear()
+                else:
+                    feature_flags.pose.set()
+                logger.info("Pose: %s", "ON" if feature_flags.pose.is_set() else "OFF")
+            elif key == ord("h"):
+                if feature_flags.hand.is_set():
+                    feature_flags.hand.clear()
+                else:
+                    feature_flags.hand.set()
+                logger.info("Hand: %s", "ON" if feature_flags.hand.is_set() else "OFF")
+            elif key == ord("f"):
+                if feature_flags.expression.is_set():
+                    feature_flags.expression.clear()
+                else:
+                    feature_flags.expression.set()
+                logger.info(
+                    "Expression: %s",
+                    "ON" if feature_flags.expression.is_set() else "OFF",
+                )
 
     except Exception as exc:  # noqa: BLE001
         logger.error("Unexpected error in display loop: %s", exc)

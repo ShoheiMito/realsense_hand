@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 
 from src.expression import ExpressionResult
-from src.processor import PoseKeypoint3D, ProcessingResult
+from src.processor import FeatureFlags, HandResult, PoseKeypoint3D, ProcessingResult
 from src.visualizer import (
+    HAND_CONNECTIONS,
     POSE_CONNECTIONS,
     PoseVisualizer,
     _build_landmark_colors,
@@ -343,6 +344,7 @@ class TestDraw:
             color_image=frame,
             landmarks_2d=landmarks_2d,
             keypoints_3d=keypoints_3d,
+            hands=None,
             expression=expression,
             processing_fps=30.0,
             timestamp=0.0,
@@ -385,6 +387,7 @@ class TestDraw:
             color_image=blank_frame,
             landmarks_2d=None,
             keypoints_3d=None,
+            hands=None,
             expression=None,
             processing_fps=25.0,
             timestamp=0.0,
@@ -411,3 +414,107 @@ class TestPoseConnections:
     def test_expected_connection_count(self) -> None:
         # 4+4 head + 1 mouth + 1 shoulders + 5+5 arms + 3 torso + 5+5 legs = 33
         assert len(POSE_CONNECTIONS) == 33
+
+
+# ---------------------------------------------------------------------------
+# HAND_CONNECTIONS sanity checks
+# ---------------------------------------------------------------------------
+
+
+class TestHandConnections:
+    def test_all_indices_in_range(self) -> None:
+        for start, end in HAND_CONNECTIONS:
+            assert 0 <= start < 21, f"Invalid start index {start}"
+            assert 0 <= end < 21, f"Invalid end index {end}"
+
+    def test_no_self_loops(self) -> None:
+        for start, end in HAND_CONNECTIONS:
+            assert start != end, f"Self-loop at index {start}"
+
+
+# ---------------------------------------------------------------------------
+# PoseVisualizer.draw_hands
+# ---------------------------------------------------------------------------
+
+
+def _make_hand_result(
+    handedness: str = "Left",
+    n_landmarks: int = 21,
+) -> HandResult:
+    """Return a dummy HandResult for testing."""
+    lm_2d = [(100 + i * 5, 200 + i * 3) for i in range(n_landmarks)]
+    return HandResult(
+        handedness=handedness,
+        landmarks_2d=lm_2d,
+        keypoints_3d=None,
+        score=0.95,
+    )
+
+
+class TestDrawHands:
+    def test_returns_ndarray(self, blank_frame: np.ndarray) -> None:
+        vis = PoseVisualizer()
+        hands = [_make_hand_result("Left")]
+        result = vis.draw_hands(blank_frame, hands)
+        assert isinstance(result, np.ndarray)
+
+    def test_same_shape(self, blank_frame: np.ndarray) -> None:
+        vis = PoseVisualizer()
+        hands = [_make_hand_result("Left")]
+        result = vis.draw_hands(blank_frame, hands)
+        assert result.shape == blank_frame.shape
+
+    def test_does_not_modify_original(self, blank_frame: np.ndarray) -> None:
+        vis = PoseVisualizer()
+        original = blank_frame.copy()
+        vis.draw_hands(blank_frame, [_make_hand_result()])
+        np.testing.assert_array_equal(blank_frame, original)
+
+    def test_draws_on_canvas(self, blank_frame: np.ndarray) -> None:
+        vis = PoseVisualizer()
+        result = vis.draw_hands(blank_frame, [_make_hand_result()])
+        assert not np.array_equal(result, blank_frame)
+
+    def test_two_hands(self, blank_frame: np.ndarray) -> None:
+        vis = PoseVisualizer()
+        hands = [_make_hand_result("Left"), _make_hand_result("Right")]
+        result = vis.draw_hands(blank_frame, hands)
+        assert not np.array_equal(result, blank_frame)
+
+    def test_empty_hands_returns_copy(self, blank_frame: np.ndarray) -> None:
+        vis = PoseVisualizer()
+        result = vis.draw_hands(blank_frame, [])
+        np.testing.assert_array_equal(result, blank_frame)
+
+
+# ---------------------------------------------------------------------------
+# PoseVisualizer.draw_feature_status
+# ---------------------------------------------------------------------------
+
+
+class TestDrawFeatureStatus:
+    def test_returns_ndarray(self, blank_frame: np.ndarray) -> None:
+        vis = PoseVisualizer()
+        flags = FeatureFlags()
+        result = vis.draw_feature_status(blank_frame, flags)
+        assert isinstance(result, np.ndarray)
+
+    def test_same_shape(self, blank_frame: np.ndarray) -> None:
+        vis = PoseVisualizer()
+        flags = FeatureFlags()
+        result = vis.draw_feature_status(blank_frame, flags)
+        assert result.shape == blank_frame.shape
+
+    def test_draws_text(self, blank_frame: np.ndarray) -> None:
+        vis = PoseVisualizer()
+        flags = FeatureFlags()
+        result = vis.draw_feature_status(blank_frame, flags)
+        assert not np.array_equal(result, blank_frame)
+
+    def test_with_features_disabled(self, blank_frame: np.ndarray) -> None:
+        vis = PoseVisualizer()
+        flags = FeatureFlags()
+        flags.pose.clear()
+        flags.hand.clear()
+        result = vis.draw_feature_status(blank_frame, flags)
+        assert not np.array_equal(result, blank_frame)

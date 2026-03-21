@@ -44,6 +44,13 @@ POSE_MIN_DETECTION_CONFIDENCE: float = 0.5
 POSE_MIN_TRACKING_CONFIDENCE: float = 0.5
 POSE_NUM_POSES: int = 1
 
+# MediaPipe HandLandmarker settings
+HAND_MODEL_PATH: str = "models/hand_landmarker.task"
+HAND_MIN_DETECTION_CONFIDENCE: float = 0.5
+HAND_MIN_TRACKING_CONFIDENCE: float = 0.5
+HAND_NUM_HANDS: int = 2
+HAND_SKIP_FRAMES: int = 1  # Run hand detection every N frames
+
 # MediaPipe FaceLandmarker settings
 FACE_MODEL_PATH: str = "models/face_landmarker.task"
 FACE_MIN_DETECTION_CONFIDENCE: float = 0.5

@@ -16,7 +16,7 @@ import numpy as np
 
 from src import config
 from src.expression import ExpressionResult
-from src.processor import PoseKeypoint3D, ProcessingResult
+from src.processor import FeatureFlags, HandResult, PoseKeypoint3D, ProcessingResult
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,28 @@ _DEBUG_KEYPOINTS: dict[int, str] = {
     16: "R.Wri",
     23: "L.Hip",
     24: "R.Hip",
+}
+
+# MediaPipe Hand landmark connections (21 landmarks per hand)
+HAND_CONNECTIONS: list[tuple[int, int]] = [
+    # Thumb
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    # Index finger
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    # Middle finger
+    (0, 9), (9, 10), (10, 11), (11, 12),
+    # Ring finger
+    (0, 13), (13, 14), (14, 15), (15, 16),
+    # Pinky
+    (0, 17), (17, 18), (18, 19), (19, 20),
+    # Palm
+    (5, 9), (9, 13), (13, 17),
+]
+
+# Hand colour per handedness (BGR)
+_HAND_COLORS: dict[str, tuple[int, int, int]] = {
+    "Left": (255, 128, 0),   # 青系
+    "Right": (0, 200, 128),  # 緑系
 }
 
 
@@ -382,6 +404,73 @@ class PoseVisualizer:
             )
             cv2.putText(canvas, text, (8, y), font, scale, text_color, thick, cv2.LINE_AA)
 
+        return canvas
+
+    def draw_hands(
+        self,
+        frame: np.ndarray,
+        hands: list[HandResult],
+    ) -> np.ndarray:
+        """Draw hand joint connections for detected hands.
+
+        Each hand is drawn in a distinct colour based on handedness
+        (left = blue-ish, right = green-ish).
+
+        Args:
+            frame: Source BGR image (H, W, 3) uint8.
+            hands: List of detected hand results.
+
+        Returns:
+            New BGR image with the hand overlay.
+        """
+        canvas = frame.copy()
+        for hand in hands:
+            color = _HAND_COLORS.get(hand.handedness, (200, 200, 200))
+            lm = hand.landmarks_2d
+            # 接続線
+            for start, end in HAND_CONNECTIONS:
+                if start < len(lm) and end < len(lm):
+                    cv2.line(canvas, lm[start], lm[end], color, 2, cv2.LINE_AA)
+            # 関節点
+            for x, y in lm:
+                cv2.circle(canvas, (x, y), 3, (255, 255, 255), -1, cv2.LINE_AA)
+                cv2.circle(canvas, (x, y), 3, color, 1, cv2.LINE_AA)
+        return canvas
+
+    def draw_feature_status(
+        self,
+        frame: np.ndarray,
+        feature_flags: FeatureFlags,
+    ) -> np.ndarray:
+        """Draw feature toggle status bar at the bottom-right corner.
+
+        Shows ``P:ON  H:OFF  F:ON`` style indicators for pose, hand,
+        and face/expression features.
+
+        Args:
+            frame: Source BGR image (H, W, 3) uint8.
+            feature_flags: Current feature toggle state.
+
+        Returns:
+            New BGR image with the status overlay.
+        """
+        canvas = frame.copy()
+        h, w = canvas.shape[:2]
+        labels = [
+            ("P", feature_flags.pose.is_set()),
+            ("H", feature_flags.hand.is_set()),
+            ("F", feature_flags.expression.is_set()),
+        ]
+        text = "  ".join(f"{key}:{'ON' if on else 'OFF'}" for key, on in labels)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.5
+        thick = 1
+        (tw, th), _ = cv2.getTextSize(text, font, scale, thick)
+        x = w - tw - 10
+        y = h - 10
+        # Drop shadow
+        cv2.putText(canvas, text, (x + 1, y + 1), font, scale, (0, 0, 0), thick + 1, cv2.LINE_AA)
+        cv2.putText(canvas, text, (x, y), font, scale, (200, 200, 200), thick, cv2.LINE_AA)
         return canvas
 
     # ------------------------------------------------------------------

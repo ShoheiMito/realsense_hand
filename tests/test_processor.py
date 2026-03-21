@@ -19,7 +19,10 @@ import pytest
 from src.depth_utils import KeypointSmoother
 from src.expression import ExpressionResult
 from src.processor import (
+    HAND_LANDMARK_NAMES,
     LANDMARK_NAMES,
+    FeatureFlags,
+    HandResult,
     PoseKeypoint3D,
     PoseProcessor,
     ProcessingResult,
@@ -38,6 +41,7 @@ def _make_frame_data() -> MagicMock:
     fd.color_image = np.zeros((480, 640, 3), dtype=np.uint8)
     fd.depth_image = np.zeros((480, 640), dtype=np.uint16)
     fd.timestamp = 1.0
+    fd.timings = {}
 
     # depth_frame mock: get_distance always returns 1.0 m
     depth_frame = MagicMock()
@@ -53,18 +57,25 @@ def _make_frame_data() -> MagicMock:
     return fd
 
 
-def _make_processor() -> PoseProcessor:
+def _make_processor(feature_flags: FeatureFlags | None = None) -> PoseProcessor:
     """Instantiate PoseProcessor bypassing model file I/O."""
     proc: PoseProcessor = PoseProcessor.__new__(PoseProcessor)
+    proc._flags = feature_flags or FeatureFlags()
     proc._landmarker = MagicMock()
+    proc._hand_landmarker = MagicMock()
     proc._expression_recognizer = MagicMock()
     proc._expression_recognizer.analyze.return_value = None
-    proc._smoother = KeypointSmoother(num_keypoints=33)
+    proc._pose_smoother = KeypointSmoother(num_keypoints=33)
+    proc._hand_smoothers = {}
     proc._frame_count = 0
+    proc._last_ts_ms = 0
     proc._last_expression = None
+    proc._last_hands = None
     proc._processing_fps = 0.0
     proc._last_fps_time = time.monotonic()
     proc._fps_frame_count = 0
+    proc._timing_buf = []
+    proc._REPORT_INTERVAL = 100
     return proc
 
 
@@ -94,6 +105,58 @@ def _no_pose_result() -> MagicMock:
     return result
 
 
+def _mock_hand_result(
+    n_hands: int = 1,
+) -> MagicMock:
+    """Return a mock HandLandmarker result with n_hands detected."""
+    result = MagicMock()
+    if n_hands == 0:
+        result.hand_landmarks = []
+        result.handedness = []
+        return result
+
+    hand_landmarks_list = []
+    handedness_list = []
+    names = ["Left", "Right"]
+    for i in range(n_hands):
+        lms = [_make_pose_landmark(x=0.5, y=0.5) for _ in range(21)]
+        hand_landmarks_list.append(lms)
+        h_cat = MagicMock()
+        h_cat.category_name = names[i % 2]
+        h_cat.score = 0.95
+        handedness_list.append([h_cat])
+    result.hand_landmarks = hand_landmarks_list
+    result.handedness = handedness_list
+    return result
+
+
+# ---------------------------------------------------------------------------
+# FeatureFlags
+# ---------------------------------------------------------------------------
+
+
+class TestFeatureFlags:
+    def test_default_all_enabled(self) -> None:
+        flags = FeatureFlags()
+        assert flags.pose.is_set()
+        assert flags.hand.is_set()
+        assert flags.expression.is_set()
+
+    def test_toggle_pose(self) -> None:
+        flags = FeatureFlags()
+        flags.pose.clear()
+        assert not flags.pose.is_set()
+        flags.pose.set()
+        assert flags.pose.is_set()
+
+    def test_independent_flags(self) -> None:
+        flags = FeatureFlags()
+        flags.hand.clear()
+        assert flags.pose.is_set()
+        assert not flags.hand.is_set()
+        assert flags.expression.is_set()
+
+
 # ---------------------------------------------------------------------------
 # PoseKeypoint3D
 # ---------------------------------------------------------------------------
@@ -118,6 +181,27 @@ class TestPoseKeypoint3D:
 
 
 # ---------------------------------------------------------------------------
+# HandResult
+# ---------------------------------------------------------------------------
+
+
+class TestHandResult:
+    def test_fields_exist(self) -> None:
+        field_names = {f.name for f in fields(HandResult)}
+        assert field_names == {"handedness", "landmarks_2d", "keypoints_3d", "score"}
+
+    def test_construction(self) -> None:
+        hr = HandResult(
+            handedness="Left",
+            landmarks_2d=[(100, 200)],
+            keypoints_3d=None,
+            score=0.95,
+        )
+        assert hr.handedness == "Left"
+        assert hr.score == pytest.approx(0.95)
+
+
+# ---------------------------------------------------------------------------
 # ProcessingResult
 # ---------------------------------------------------------------------------
 
@@ -129,9 +213,11 @@ class TestProcessingResult:
             "color_image",
             "landmarks_2d",
             "keypoints_3d",
+            "hands",
             "expression",
             "processing_fps",
             "timestamp",
+            "timings",
         }
 
     def test_construction_all_none(self) -> None:
@@ -140,12 +226,14 @@ class TestProcessingResult:
             color_image=img,
             landmarks_2d=None,
             keypoints_3d=None,
+            hands=None,
             expression=None,
             processing_fps=0.0,
             timestamp=0.0,
         )
         assert result.landmarks_2d is None
         assert result.keypoints_3d is None
+        assert result.hands is None
         assert result.expression is None
 
     def test_construction_with_data(self) -> None:
@@ -158,6 +246,7 @@ class TestProcessingResult:
             color_image=img,
             landmarks_2d=[(320, 240)],
             keypoints_3d=[kp],
+            hands=None,
             expression=expr,
             processing_fps=29.5,
             timestamp=1.0,
@@ -193,6 +282,19 @@ class TestLandmarkNames:
         assert "left_ankle" in LANDMARK_NAMES
 
 
+class TestHandLandmarkNames:
+    def test_count_is_21(self) -> None:
+        assert len(HAND_LANDMARK_NAMES) == 21
+
+    def test_no_duplicates(self) -> None:
+        assert len(HAND_LANDMARK_NAMES) == len(set(HAND_LANDMARK_NAMES))
+
+    def test_known_names_present(self) -> None:
+        assert "wrist" in HAND_LANDMARK_NAMES
+        assert "thumb_tip" in HAND_LANDMARK_NAMES
+        assert "index_finger_tip" in HAND_LANDMARK_NAMES
+
+
 # ---------------------------------------------------------------------------
 # Shared mp fixture for process_frame tests
 # ---------------------------------------------------------------------------
@@ -221,30 +323,35 @@ class TestProcessFrameNoPose:
         return _make_processor()
 
     def test_returns_processing_result(self, proc: PoseProcessor) -> None:
-        proc._landmarker.detect.return_value = _no_pose_result()
+        proc._landmarker.detect_for_video.return_value = _no_pose_result()
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         fd = _make_frame_data()
         result = proc.process_frame(fd)
         assert isinstance(result, ProcessingResult)
 
     def test_landmarks_2d_is_none(self, proc: PoseProcessor) -> None:
-        proc._landmarker.detect.return_value = _no_pose_result()
+        proc._landmarker.detect_for_video.return_value = _no_pose_result()
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         assert result.landmarks_2d is None
 
     def test_keypoints_3d_is_none(self, proc: PoseProcessor) -> None:
-        proc._landmarker.detect.return_value = _no_pose_result()
+        proc._landmarker.detect_for_video.return_value = _no_pose_result()
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         assert result.keypoints_3d is None
 
     def test_color_image_preserved(self, proc: PoseProcessor) -> None:
-        proc._landmarker.detect.return_value = _no_pose_result()
+        proc._landmarker.detect_for_video.return_value = _no_pose_result()
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         fd = _make_frame_data()
         fd.color_image[0, 0] = [255, 128, 0]
         result = proc.process_frame(fd)
         assert result.color_image[0, 0, 0] == 255
 
     def test_timestamp_preserved(self, proc: PoseProcessor) -> None:
-        proc._landmarker.detect.return_value = _no_pose_result()
+        proc._landmarker.detect_for_video.return_value = _no_pose_result()
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         fd = _make_frame_data()
         fd.timestamp = 42.0
         result = proc.process_frame(fd)
@@ -270,17 +377,19 @@ class TestProcessFrameWithPose:
         return [_make_pose_landmark(x=0.5, y=0.5) for _ in range(33)]
 
     def test_landmarks_2d_length_is_33(self, proc: PoseProcessor) -> None:
-        proc._landmarker.detect.return_value = _mock_pose_result(
+        proc._landmarker.detect_for_video.return_value = _mock_pose_result(
             self._landmarks_33()
         )
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         assert result.landmarks_2d is not None
         assert len(result.landmarks_2d) == 33
 
     def test_landmarks_2d_are_tuples_of_ints(self, proc: PoseProcessor) -> None:
-        proc._landmarker.detect.return_value = _mock_pose_result(
+        proc._landmarker.detect_for_video.return_value = _mock_pose_result(
             self._landmarks_33()
         )
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         assert result.landmarks_2d is not None
         for pt in result.landmarks_2d:
@@ -288,9 +397,10 @@ class TestProcessFrameWithPose:
             assert isinstance(pt[1], int)
 
     def test_landmarks_2d_within_image_bounds(self, proc: PoseProcessor) -> None:
-        proc._landmarker.detect.return_value = _mock_pose_result(
+        proc._landmarker.detect_for_video.return_value = _mock_pose_result(
             self._landmarks_33()
         )
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         assert result.landmarks_2d is not None
         for x, y in result.landmarks_2d:
@@ -298,17 +408,19 @@ class TestProcessFrameWithPose:
             assert 0 <= y < 480
 
     def test_keypoints_3d_length_is_33(self, proc: PoseProcessor) -> None:
-        proc._landmarker.detect.return_value = _mock_pose_result(
+        proc._landmarker.detect_for_video.return_value = _mock_pose_result(
             self._landmarks_33()
         )
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         assert result.keypoints_3d is not None
         assert len(result.keypoints_3d) == 33
 
     def test_keypoints_3d_type(self, proc: PoseProcessor) -> None:
-        proc._landmarker.detect.return_value = _mock_pose_result(
+        proc._landmarker.detect_for_video.return_value = _mock_pose_result(
             self._landmarks_33()
         )
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         assert result.keypoints_3d is not None
         for kp in result.keypoints_3d:
@@ -317,9 +429,10 @@ class TestProcessFrameWithPose:
     def test_keypoints_3d_names_match_landmark_names(
         self, proc: PoseProcessor
     ) -> None:
-        proc._landmarker.detect.return_value = _mock_pose_result(
+        proc._landmarker.detect_for_video.return_value = _mock_pose_result(
             self._landmarks_33()
         )
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         assert result.keypoints_3d is not None
         for kp, expected_name in zip(result.keypoints_3d, LANDMARK_NAMES):
@@ -327,7 +440,8 @@ class TestProcessFrameWithPose:
 
     def test_keypoints_visibility_propagated(self, proc: PoseProcessor) -> None:
         lms = [_make_pose_landmark(visibility=0.75) for _ in range(33)]
-        proc._landmarker.detect.return_value = _mock_pose_result(lms)
+        proc._landmarker.detect_for_video.return_value = _mock_pose_result(lms)
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         assert result.keypoints_3d is not None
         for kp in result.keypoints_3d:
@@ -337,7 +451,8 @@ class TestProcessFrameWithPose:
         self, proc: PoseProcessor
     ) -> None:
         lms = [_make_pose_landmark(visibility=None) for _ in range(33)]  # type: ignore[arg-type]
-        proc._landmarker.detect.return_value = _mock_pose_result(lms)
+        proc._landmarker.detect_for_video.return_value = _mock_pose_result(lms)
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         assert result.keypoints_3d is not None
         for kp in result.keypoints_3d:
@@ -346,12 +461,99 @@ class TestProcessFrameWithPose:
     def test_out_of_bounds_landmarks_clamped(self, proc: PoseProcessor) -> None:
         """Normalised coords > 1.0 or < 0.0 must be clamped to image bounds."""
         lms = [_make_pose_landmark(x=-0.5, y=2.0) for _ in range(33)]
-        proc._landmarker.detect.return_value = _mock_pose_result(lms)
+        proc._landmarker.detect_for_video.return_value = _mock_pose_result(lms)
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         assert result.landmarks_2d is not None
         for x, y in result.landmarks_2d:
             assert x == 0
             assert y == 479
+
+
+# ---------------------------------------------------------------------------
+# PoseProcessor.process_frame — hand detection
+# ---------------------------------------------------------------------------
+
+
+class TestProcessFrameWithHands:
+    @pytest.fixture(autouse=True)
+    def _patch_mp(self) -> None:  # type: ignore[return]
+        with patch("src.processor.mp", _make_mp_mock()):
+            yield
+
+    @pytest.fixture
+    def proc(self) -> PoseProcessor:
+        p = _make_processor()
+        p._landmarker.detect_for_video.return_value = _no_pose_result()
+        return p
+
+    def test_hands_detected(self, proc: PoseProcessor) -> None:
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(2)
+        result = proc.process_frame(_make_frame_data())
+        assert result.hands is not None
+        assert len(result.hands) == 2
+
+    def test_hand_result_type(self, proc: PoseProcessor) -> None:
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(1)
+        result = proc.process_frame(_make_frame_data())
+        assert result.hands is not None
+        assert isinstance(result.hands[0], HandResult)
+
+    def test_hand_landmarks_count(self, proc: PoseProcessor) -> None:
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(1)
+        result = proc.process_frame(_make_frame_data())
+        assert result.hands is not None
+        assert len(result.hands[0].landmarks_2d) == 21
+
+    def test_hand_handedness(self, proc: PoseProcessor) -> None:
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(2)
+        result = proc.process_frame(_make_frame_data())
+        assert result.hands is not None
+        names = {h.handedness for h in result.hands}
+        assert names == {"Left", "Right"}
+
+    def test_no_hands_returns_none(self, proc: PoseProcessor) -> None:
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
+        result = proc.process_frame(_make_frame_data())
+        assert result.hands is None
+
+    def test_hand_disabled_returns_none(self, proc: PoseProcessor) -> None:
+        proc._flags.hand.clear()
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(2)
+        result = proc.process_frame(_make_frame_data())
+        assert result.hands is None
+
+
+# ---------------------------------------------------------------------------
+# Feature flags in process_frame
+# ---------------------------------------------------------------------------
+
+
+class TestFeatureFlagsInProcessFrame:
+    @pytest.fixture(autouse=True)
+    def _patch_mp(self) -> None:  # type: ignore[return]
+        with patch("src.processor.mp", _make_mp_mock()):
+            yield
+
+    def test_pose_disabled_returns_none(self) -> None:
+        flags = FeatureFlags()
+        flags.pose.clear()
+        proc = _make_processor(feature_flags=flags)
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
+        result = proc.process_frame(_make_frame_data())
+        assert result.landmarks_2d is None
+        assert result.keypoints_3d is None
+        proc._landmarker.detect_for_video.assert_not_called()
+
+    def test_expression_disabled_returns_none(self) -> None:
+        flags = FeatureFlags()
+        flags.expression.clear()
+        proc = _make_processor(feature_flags=flags)
+        proc._landmarker.detect_for_video.return_value = _no_pose_result()
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
+        result = proc.process_frame(_make_frame_data())
+        assert result.expression is None
+        proc._expression_recognizer.analyze.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -368,13 +570,11 @@ class TestExpressionInterval:
     @pytest.fixture
     def proc(self) -> PoseProcessor:
         p = _make_processor()
-        p._landmarker.detect.return_value = _no_pose_result()
+        p._landmarker.detect_for_video.return_value = _no_pose_result()
+        p._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         return p
 
     def test_expression_called_on_first_frame(self, proc: PoseProcessor) -> None:
-        """Frame 1 % EXPRESSION_SKIP_FRAMES == 0 when SKIP_FRAMES divides 1... Actually
-        the first call sets frame_count=1.  We verify analyze is called exactly when
-        frame_count % SKIP is 0."""
         from src import config
 
         # Force frame_count to SKIP-1 so next call triggers expression
@@ -402,8 +602,6 @@ class TestExpressionInterval:
         proc._frame_count = 1  # next call is frame 2; skip if SKIP > 2
 
         result = proc.process_frame(_make_frame_data())
-        # Whether or not analyze was called, expression must be non-None
-        # (either the cached value or a new result)
         if config.EXPRESSION_SKIP_FRAMES > 2:
             assert result.expression is cached
         else:
@@ -447,6 +645,11 @@ class TestPoseProcessorClose:
         proc.close()
         proc._landmarker.close.assert_called_once()
 
+    def test_close_calls_hand_landmarker_close(self) -> None:
+        proc = _make_processor()
+        proc.close()
+        proc._hand_landmarker.close.assert_called_once()
+
     def test_close_calls_expression_recognizer_close(self) -> None:
         proc = _make_processor()
         proc.close()
@@ -457,6 +660,13 @@ class TestPoseProcessorClose:
         proc._landmarker.close.side_effect = RuntimeError("oops")
         proc.close()  # must not raise
         proc._expression_recognizer.close.assert_called_once()
+
+    def test_close_handles_none_landmarkers(self) -> None:
+        proc = _make_processor()
+        proc._landmarker = None
+        proc._hand_landmarker = None
+        proc._expression_recognizer = None
+        proc.close()  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -472,14 +682,16 @@ class TestFpsTracking:
 
     def test_fps_is_zero_initially(self) -> None:
         proc = _make_processor()
-        proc._landmarker.detect.return_value = _no_pose_result()
+        proc._landmarker.detect_for_video.return_value = _no_pose_result()
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
         result = proc.process_frame(_make_frame_data())
         # Only one frame processed, elapsed < 1 s → fps still 0.0
         assert result.processing_fps == pytest.approx(0.0)
 
     def test_fps_updates_after_one_second(self) -> None:
         proc = _make_processor()
-        proc._landmarker.detect.return_value = _no_pose_result()
+        proc._landmarker.detect_for_video.return_value = _no_pose_result()
+        proc._hand_landmarker.detect_for_video.return_value = _mock_hand_result(0)
 
         # Simulate 30 frames in 1.1 s by back-dating the fps timer
         proc._last_fps_time = time.monotonic() - 1.1
@@ -502,6 +714,7 @@ class TestProcessingThread:
             color_image=np.zeros((480, 640, 3), dtype=np.uint8),
             landmarks_2d=None,
             keypoints_3d=None,
+            hands=None,
             expression=None,
             processing_fps=30.0,
             timestamp=1.0,
@@ -623,6 +836,7 @@ class TestProcessingThread:
             color_image=np.zeros((480, 640, 3), dtype=np.uint8),
             landmarks_2d=None,
             keypoints_3d=None,
+            hands=None,
             expression=None,
             processing_fps=0.0,
             timestamp=0.0,
