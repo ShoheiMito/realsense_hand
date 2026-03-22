@@ -1,29 +1,27 @@
-# RealSense L515 3D Pose Estimation
+# RealSense L515 Hand Gesture Control
 
-Intel RealSense L515（LiDARデプスカメラ）を使用したリアルタイム3D全身ポーズ推定・手指トラッキング・表情認識システム。
+Intel RealSense L515（LiDARデプスカメラ）の手指トラッキングを使用したPC画面操作システム。
 
-研究・プロトタイプ用途。目標: 30fps以上のリアルタイム処理。
+手指ジェスチャーでマウスカーソル移動・クリック・ドラッグ・スクロールをリアルタイムで実行します。
 
 ---
 
-## 機能
+## ジェスチャー操作
 
-| 機能 | 詳細 |
-|------|------|
-| **全身ポーズ推定** | MediaPipe PoseLandmarker（33点） |
-| **手指トラッキング** | MediaPipe HandLandmarker（片手21点 × 両手） |
-| **表情認識** | FaceLandmarker + ブレンドシェイプ → happy / surprise / angry / sad / neutral |
-| **3D座標** | RealSense深度センサーによる各キーポイントのX/Y/Z座標（メートル） |
-| **時間的スムージング** | One Euro Filterによるノイズ低減 |
-| **機能トグル** | ポーズ・手・表情をCLI引数またはランタイムキーボードで独立ON/OFF |
+| 操作 | ジェスチャー | 説明 |
+|------|------------|------|
+| **カーソル移動** | 人差し指を立てる | カメラ中央70%領域がスクリーン全体にマッピング |
+| **クリック** | ピンチして素早く離す | 親指と人差し指をつまむ→離す（0.3秒以内） |
+| **ドラッグ** | ピンチしたまま移動 | つまんだまま手を動かす |
+| **スクロール** | 2本指を立てて上下 | 人差し指+中指を伸ばして上下移動 |
 
 ---
 
 ## 必要環境
 
-- Python 3.11+
+- Python 3.10+
 - Intel RealSense L515（USB 3.x接続）
-- Windows / Linux（macOSは未確認）
+- Windows（pynputによるマウス制御）
 
 > **注意:** L515 は生産終了品であり、pyrealsense2 v2.55 以降では認識されません。
 > `requirements.txt` で `pyrealsense2==2.54.1.5216` に固定しています。
@@ -41,24 +39,16 @@ pip install -r requirements.txt
 ### 2. MediaPipe モデルのダウンロード
 
 ```bash
-# 全身ポーズ推定モデル
-curl -L -o models/pose_landmarker_full.task \
-  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
-
 # 手指トラッキングモデル
 curl -L -o models/hand_landmarker.task \
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
-
-# 顔ランドマークモデル（表情認識用）
-curl -L -o models/face_landmarker.task \
-  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
 ```
 
 ---
 
 ## 実行
 
-### 基本
+### 基本（手指コントロール有効）
 
 ```bash
 python -m src.main
@@ -67,11 +57,8 @@ python -m src.main
 ### オプション
 
 ```bash
-# 特定機能を無効化して起動
-python -m src.main --no-hand          # 手検出なし
-python -m src.main --no-expression    # 表情認識なし
-python -m src.main --no-pose          # ポーズ推定なし（手+表情のみ）
-python -m src.main --no-3d            # 3D座標HUDを非表示
+# マウス制御なし（手指トラッキング表示のみ）
+python -m src.main --no-control
 
 # 解像度変更
 python -m src.main --resolution 1280x720
@@ -84,12 +71,8 @@ python -m src.main --record
 
 | キー | 操作 |
 |------|------|
-| `p` | ポーズ推定 ON/OFF |
-| `h` | 手指トラッキング ON/OFF |
-| `f` | 表情認識 ON/OFF |
+| `c` | マウス制御 ON/OFF トグル |
 | `q` | 終了 |
-
-画面右下に現在のトグル状態 `P:ON  H:ON  F:OFF` が表示されます。
 
 ---
 
@@ -99,32 +82,29 @@ python -m src.main --record
 
 ```
 [Camera Thread]          [Processing Thread]         [Main Thread]
-RealSense L515      →    PoseLandmarker          →   draw_skeleton()
-  Align                  HandLandmarker              draw_hands()
-  Depth Filter           3D Deprojection             draw_expression()
-  FrameData              One Euro Smoother            draw_feature_status()
-  → frame_queue          ExpressionRecognizer         cv2.imshow()
-                         → result_queue
+RealSense L515      →    HandLandmarker          →   draw_hands()
+  Align                   3D Deprojection             HandController.update()
+  Depth Filter            One Euro Smoother            → mouse move/click/scroll
+  FrameData               HandResult                  draw_control_overlay()
+  → frame_queue           → result_queue              cv2.imshow()
 ```
 
 - `frame_queue` / `result_queue` は `maxsize=2` で古いフレームを破棄しレイテンシ蓄積を防止
-- `FeatureFlags`（`threading.Event` × 3）でスレッドセーフな機能トグルを実現
-- モデルは初回使用時に遅延初期化（起動時間・メモリ節約）
-
-詳細は [docs/architecture.md](docs/architecture.md) を参照。
+- 手指検出のみで ~20ms/frame（50fps相当、カメラ30fps上限）
 
 ---
 
-## パフォーマンス目安
+## 設定調整
 
-| 構成 | 処理時間目安 | 30fps達成 |
-|------|-------------|-----------|
-| Pose + Face | ~18ms | ✅ |
-| Pose + Hand（両手） | ~30–40ms | ⚠️ ギリギリ |
-| Pose + Hand + Face（全機能） | ~35–45ms | ⚠️ `HAND_SKIP_FRAMES=2` 推奨 |
-| Hand（両手）のみ | ~20ms | ✅ |
+`src/config.py` の `CONTROL_*` 定数でジェスチャー感度を調整可能:
 
-> `src/config.py` の `HAND_SKIP_FRAMES` を `2` にすると、手検出を1フレームおきに実行してCPU負荷を下げられます。
+| 設定 | デフォルト | 説明 |
+|------|-----------|------|
+| `CONTROL_ACTIVE_REGION` | 0.7 | カメラ画面の操作領域（中央何%） |
+| `CONTROL_SMOOTHING_ALPHA` | 0.4 | カーソル平滑化（0=スムーズ, 1=即応） |
+| `CONTROL_PINCH_THRESHOLD_PX` | 30 | ピンチ検出距離（px） |
+| `CONTROL_SCROLL_SENSITIVITY` | 3.0 | スクロール感度 |
+| `CONTROL_MIRROR_X` | True | X軸ミラーリング |
 
 ---
 
@@ -142,8 +122,6 @@ mypy src/ --ignore-missing-imports
 
 # リント
 ruff check src/
-
-# フォーマット
 ruff format src/
 ```
 
@@ -152,10 +130,9 @@ ruff format src/
 ## RealSense L515 注意事項
 
 - **USB 3.x接続必須**（USB 2.0では深度が 320×240 に制限）
-- 赤外線ストリームはインデックス **0** のみ有効（1を指定すると RuntimeError）
+- 赤外線ストリームはインデックス **0** のみ有効
 - カラーと深度は同一解像度で設定（640×480 推奨）
-- 深度フィルタチェーン: `spatial → temporal → hole_filling`（この順序で適用）
-- ディスパリティ変換不要（LiDARのため）
+- 深度フィルタチェーン: `spatial → temporal → hole_filling`
 
 ---
 
@@ -170,7 +147,7 @@ MIT License
 | ライブラリ | ライセンス | 用途 |
 |-----------|-----------|------|
 | [pyrealsense2](https://github.com/IntelRealSense/librealsense) | Apache 2.0 | RealSense SDK |
-| [mediapipe](https://github.com/google-ai-edge/mediapipe) | Apache 2.0 | ポーズ・手・顔推定 |
+| [mediapipe](https://github.com/google-ai-edge/mediapipe) | Apache 2.0 | 手指ランドマーク検出 |
+| [pynput](https://github.com/moses-palmer/pynput) | LGPL 3.0 | マウス制御 |
 | [opencv-python](https://github.com/opencv/opencv) | Apache 2.0 | 描画・表示 |
 | [numpy](https://numpy.org/) | BSD | 数値計算 |
-| [onnxruntime](https://github.com/microsoft/onnxruntime) | MIT | 将来の推論拡張用 |

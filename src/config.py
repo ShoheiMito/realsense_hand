@@ -1,4 +1,4 @@
-"""Configuration constants for RealSense pose estimation system."""
+"""Configuration constants for RealSense hand control system."""
 
 from dataclasses import dataclass
 
@@ -25,9 +25,6 @@ HOLE_FILLING_MODE: int = 1  # 0: fill from left, 1: farthest from around, 2: nea
 # Depth fallback settings
 DEPTH_FALLBACK_KERNEL_SIZE: int = 5
 
-# Expression recognition settings
-EXPRESSION_SKIP_FRAMES: int = 5  # Run expression recognition every N frames
-
 
 @dataclass
 class OneEuroFilterParams:
@@ -38,23 +35,12 @@ class OneEuroFilterParams:
     d_cutoff: float = 1.0
 
 
-# MediaPipe Pose model settings
-POSE_MODEL_PATH: str = "models/pose_landmarker_full.task"
-POSE_MIN_DETECTION_CONFIDENCE: float = 0.5
-POSE_MIN_TRACKING_CONFIDENCE: float = 0.5
-POSE_NUM_POSES: int = 1
-
 # MediaPipe HandLandmarker settings
 HAND_MODEL_PATH: str = "models/hand_landmarker.task"
 HAND_MIN_DETECTION_CONFIDENCE: float = 0.5
 HAND_MIN_TRACKING_CONFIDENCE: float = 0.5
 HAND_NUM_HANDS: int = 2
 HAND_SKIP_FRAMES: int = 1  # Run hand detection every N frames
-
-# MediaPipe FaceLandmarker settings
-FACE_MODEL_PATH: str = "models/face_landmarker.task"
-FACE_MIN_DETECTION_CONFIDENCE: float = 0.5
-FACE_MIN_TRACKING_CONFIDENCE: float = 0.5
 
 # Depth valid range (meters)
 DEPTH_MIN_DISTANCE: float = 0.25
@@ -63,4 +49,20 @@ DEPTH_MAX_DISTANCE: float = 4.0
 # Visualization settings
 SKELETON_LINE_THICKNESS: int = 3
 SKELETON_CIRCLE_RADIUS: int = 5
-WINDOW_NAME: str = "RealSense 3D Pose"
+WINDOW_NAME: str = "RealSense Hand Control"
+
+# ---------------------------------------------------------------------------
+# Hand controller settings
+# ---------------------------------------------------------------------------
+CONTROL_ACTIVE_REGION: float = 0.7       # カメラ画面の中央何%を操作領域にするか
+CONTROL_SMOOTHING_ALPHA: float = 0.4     # EMA平滑化係数 (0=スムーズ, 1=即応)
+CONTROL_DEADZONE_PX: int = 2             # この画素数以下の移動は無視
+CONTROL_PINCH_THRESHOLD_PX: int = 30     # ピンチ検出閾値（ピクセル距離）
+CONTROL_PINCH_RELEASE_THRESHOLD_PX: int = 40  # ピンチ解除閾値（ヒステリシス）
+CONTROL_CLICK_MAX_DURATION_S: float = 0.3     # クリック判定の最大保持時間
+CONTROL_CLICK_MAX_MOVE_PX: int = 20      # クリック判定の最大移動量
+CONTROL_DRAG_MIN_HOLD_S: float = 0.25    # ドラッグ判定の最小保持時間
+CONTROL_SCROLL_SENSITIVITY: float = 3.0  # スクロール感度
+CONTROL_HAND_LOST_FRAMES: int = 5        # 手消失判定フレーム数
+CONTROL_GESTURE_CONFIRM_FRAMES: int = 3  # ジェスチャー確定フレーム数
+CONTROL_MIRROR_X: bool = True            # X軸ミラーリング
