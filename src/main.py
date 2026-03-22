@@ -234,6 +234,26 @@ def main() -> None:
             elif key == ord("c"):
                 if controller is not None:
                     controller.toggle_control()
+            elif key == ord("r"):
+                if video_writer is not None:
+                    video_writer.release()
+                    video_writer = None
+                    logger.info("Recording stopped.")
+                else:
+                    timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+                    output_path = f"output_{timestamp_str}.avi"
+                    fourcc = cv2.VideoWriter_fourcc(*"XVID")  # type: ignore[attr-defined]
+                    video_writer = cv2.VideoWriter(
+                        output_path,
+                        fourcc,
+                        float(config.CAMERA_FPS),
+                        (config.CAMERA_WIDTH, config.CAMERA_HEIGHT),
+                    )
+                    if video_writer.isOpened():
+                        logger.info("Recording started: %s", output_path)
+                    else:
+                        logger.error("Failed to start recording.")
+                        video_writer = None
 
     except Exception as exc:  # noqa: BLE001
         logger.error("Unexpected error in display loop: %s", exc)

@@ -42,6 +42,7 @@ _HAND_COLORS: dict[str, tuple[int, int, int]] = {
 # Gesture state → overlay colour (BGR)
 _GESTURE_COLORS: dict[str, tuple[int, int, int]] = {
     "idle": (128, 128, 128),      # gray
+    "neutral": (0, 255, 255),     # yellow — 手は見えているがカーソル固定
     "cursor": (0, 255, 0),        # green
     "click_down": (0, 0, 255),    # red
     "dragging": (0, 165, 255),    # orange

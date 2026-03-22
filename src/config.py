@@ -66,3 +66,16 @@ CONTROL_SCROLL_SENSITIVITY: float = 3.0  # スクロール感度
 CONTROL_HAND_LOST_FRAMES: int = 5        # 手消失判定フレーム数
 CONTROL_GESTURE_CONFIRM_FRAMES: int = 3  # ジェスチャー確定フレーム数
 CONTROL_MIRROR_X: bool = True            # X軸ミラーリング
+
+# クラッチ制御
+CONTROL_CLUTCH_ENABLED: bool = True      # クラッチ方式を有効にする
+
+# 3Dピンチ検出（メートル単位）
+CONTROL_PINCH_THRESHOLD_3D_M: float = 0.025       # 25mm ピンチ検出
+CONTROL_PINCH_RELEASE_THRESHOLD_3D_M: float = 0.035  # 35mm ピンチ解除
+CONTROL_USE_3D_PINCH: bool = True        # 3Dデータがあれば3D距離を使用
+
+# カーソルOne Euroフィルターパラメータ
+CURSOR_ONE_EURO_MIN_CUTOFF: float = 0.5
+CURSOR_ONE_EURO_BETA: float = 0.01
+CURSOR_ONE_EURO_D_CUTOFF: float = 1.0

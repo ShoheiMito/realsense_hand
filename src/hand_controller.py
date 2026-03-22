@@ -14,10 +14,11 @@ import enum
 import logging
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from src import config
-from src.processor import HandResult
+from src.depth_utils import OneEuroFilter
+from src.processor import HandResult, PoseKeypoint3D
 
 try:
     from pynput.mouse import Button, Controller as MouseController
@@ -38,6 +39,7 @@ class GestureState(enum.Enum):
     """Gesture states for the hand controller."""
 
     IDLE = "idle"
+    NEUTRAL = "neutral"      # 手は見えているがカーソル固定
     CURSOR = "cursor"
     CLICK_DOWN = "click_down"
     DRAGGING = "dragging"
@@ -114,6 +116,59 @@ class GestureDetector:
         return index_ext and middle_ext and not ring_ext
 
     @staticmethod
+    def is_pointing_pose(landmarks_2d: list[tuple[int, int]]) -> bool:
+        """Detect index-only pointing: index extended, middle+ring folded.
+
+        Args:
+            landmarks_2d: 21 hand landmarks in pixel coordinates.
+
+        Returns:
+            True if only the index finger is extended.
+        """
+        index_ext = GestureDetector.is_finger_extended(landmarks_2d, 8, 6)
+        middle_ext = GestureDetector.is_finger_extended(landmarks_2d, 12, 10)
+        ring_ext = GestureDetector.is_finger_extended(landmarks_2d, 16, 14)
+        return index_ext and not middle_ext and not ring_ext
+
+    @staticmethod
+    def is_open_hand(landmarks_2d: list[tuple[int, int]]) -> bool:
+        """Detect open hand: index, middle, and ring all extended.
+
+        Args:
+            landmarks_2d: 21 hand landmarks in pixel coordinates.
+
+        Returns:
+            True if 3+ fingers are extended (open palm).
+        """
+        index_ext = GestureDetector.is_finger_extended(landmarks_2d, 8, 6)
+        middle_ext = GestureDetector.is_finger_extended(landmarks_2d, 12, 10)
+        ring_ext = GestureDetector.is_finger_extended(landmarks_2d, 16, 14)
+        return index_ext and middle_ext and ring_ext
+
+    @staticmethod
+    def pinch_distance_3d(
+        keypoints_3d: list[PoseKeypoint3D] | None,
+    ) -> float | None:
+        """Compute 3D distance in metres between thumb tip and index tip.
+
+        Args:
+            keypoints_3d: 21 hand landmarks in 3D world coordinates, or None.
+
+        Returns:
+            Distance in metres, or None if 3D data is unavailable.
+        """
+        if keypoints_3d is None or len(keypoints_3d) < 9:
+            return None
+        thumb = keypoints_3d[4]
+        index = keypoints_3d[8]
+        if thumb.z <= 0 or index.z <= 0:
+            return None
+        dx = thumb.x - index.x
+        dy = thumb.y - index.y
+        dz = thumb.z - index.z
+        return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+    @staticmethod
     def get_index_tip(landmarks_2d: list[tuple[int, int]]) -> tuple[int, int]:
         """Return index finger tip coordinates."""
         return landmarks_2d[8]
@@ -132,21 +187,19 @@ class GestureDetector:
 
 
 class CoordinateMapper:
-    """Maps camera pixel coordinates to screen coordinates with smoothing."""
+    """Maps camera pixel coordinates to screen coordinates with One Euro smoothing."""
 
     def __init__(
         self,
         camera_width: int = config.CAMERA_WIDTH,
         camera_height: int = config.CAMERA_HEIGHT,
         active_region: float = config.CONTROL_ACTIVE_REGION,
-        smoothing_alpha: float = config.CONTROL_SMOOTHING_ALPHA,
         deadzone_px: int = config.CONTROL_DEADZONE_PX,
         mirror_x: bool = config.CONTROL_MIRROR_X,
     ) -> None:
         self.camera_width = camera_width
         self.camera_height = camera_height
         self.active_region = active_region
-        self.smoothing_alpha = smoothing_alpha
         self.deadzone_px = deadzone_px
         self.mirror_x = mirror_x
 
@@ -164,7 +217,14 @@ class CoordinateMapper:
                 self.screen_width, self.screen_height,
             )
 
-        # EMA state
+        # One Euro filter state (replaces EMA)
+        self._filter_params = config.OneEuroFilterParams(
+            min_cutoff=config.CURSOR_ONE_EURO_MIN_CUTOFF,
+            beta=config.CURSOR_ONE_EURO_BETA,
+            d_cutoff=config.CURSOR_ONE_EURO_D_CUTOFF,
+        )
+        self._filter_x = OneEuroFilter(self._filter_params)
+        self._filter_y = OneEuroFilter(self._filter_params)
         self._prev_sx: float = self.screen_width / 2.0
         self._prev_sy: float = self.screen_height / 2.0
         self._initialized: bool = False
@@ -177,16 +237,22 @@ class CoordinateMapper:
         self._min_y = margin_y
         self._max_y = camera_height - margin_y
 
-    def map(self, cam_x: int, cam_y: int) -> tuple[int, int]:
+    def map(
+        self, cam_x: int, cam_y: int, timestamp: float | None = None,
+    ) -> tuple[int, int]:
         """Convert camera pixel position to smoothed screen coordinates.
 
         Args:
             cam_x: X pixel in camera frame.
             cam_y: Y pixel in camera frame.
+            timestamp: Current time in seconds. Uses time.monotonic() if None.
 
         Returns:
             (screen_x, screen_y) coordinates.
         """
+        if timestamp is None:
+            timestamp = time.monotonic()
+
         # Clamp to active region
         cx = max(self._min_x, min(self._max_x, float(cam_x)))
         cy = max(self._min_y, min(self._max_y, float(cam_y)))
@@ -203,15 +269,14 @@ class CoordinateMapper:
         raw_sx = norm_x * self.screen_width
         raw_sy = norm_y * self.screen_height
 
-        # EMA smoothing
-        if not self._initialized:
-            self._prev_sx = raw_sx
-            self._prev_sy = raw_sy
-            self._initialized = True
+        # One Euro smoothing (adaptive: fast move = less lag, slow move = more smooth)
+        sx = self._filter_x(raw_sx, timestamp)
+        sy = self._filter_y(raw_sy, timestamp)
 
-        alpha = self.smoothing_alpha
-        sx = alpha * raw_sx + (1.0 - alpha) * self._prev_sx
-        sy = alpha * raw_sy + (1.0 - alpha) * self._prev_sy
+        if not self._initialized:
+            self._prev_sx = sx
+            self._prev_sy = sy
+            self._initialized = True
 
         # Dead zone — don't move if delta is tiny
         dx = abs(sx - self._prev_sx)
@@ -228,7 +293,9 @@ class CoordinateMapper:
         return (final_x, final_y)
 
     def reset(self) -> None:
-        """Reset EMA state."""
+        """Reset filter state."""
+        self._filter_x = OneEuroFilter(self._filter_params)
+        self._filter_y = OneEuroFilter(self._filter_params)
         self._initialized = False
         self._prev_sx = self.screen_width / 2.0
         self._prev_sy = self.screen_height / 2.0
@@ -318,44 +385,74 @@ class HandController:
         self._hand_detected_frames += 1
 
         index_tip = self._detector.get_index_tip(landmarks)
-        pinch_dist = self._detector.pinch_distance(landmarks)
+        pinch_dist_2d = self._detector.pinch_distance(landmarks)
         is_scroll = self._detector.is_scroll_pose(landmarks)
+        is_pointing = self._detector.is_pointing_pose(landmarks)
+        is_open = self._detector.is_open_hand(landmarks)
 
         self._last_index_tip_px = index_tip
-        self._last_pinch_dist = pinch_dist
+        self._last_pinch_dist = pinch_dist_2d
 
-        # Check pinch with hysteresis
-        if self._is_pinching:
-            pinching = pinch_dist < config.CONTROL_PINCH_RELEASE_THRESHOLD_PX
+        # 3Dピンチ検出（利用可能な場合）、2Dフォールバック
+        pinch_dist_3d = self._detector.pinch_distance_3d(hand.keypoints_3d)
+        if config.CONTROL_USE_3D_PINCH and pinch_dist_3d is not None:
+            if self._is_pinching:
+                pinching = pinch_dist_3d < config.CONTROL_PINCH_RELEASE_THRESHOLD_3D_M
+            else:
+                pinching = pinch_dist_3d < config.CONTROL_PINCH_THRESHOLD_3D_M
         else:
-            pinching = pinch_dist < config.CONTROL_PINCH_THRESHOLD_PX
+            if self._is_pinching:
+                pinching = pinch_dist_2d < config.CONTROL_PINCH_RELEASE_THRESHOLD_PX
+            else:
+                pinching = pinch_dist_2d < config.CONTROL_PINCH_THRESHOLD_PX
 
-        # Debounce hand detection
+        # Debounce hand detection: IDLE → NEUTRAL
         if self._state == GestureState.IDLE:
             if self._hand_detected_frames >= config.CONTROL_GESTURE_CONFIRM_FRAMES:
-                self._state = GestureState.CURSOR
-                self._mapper.reset()
+                self._state = GestureState.NEUTRAL
             return GestureInfo(
                 state=self._state,
                 index_tip_px=index_tip,
-                pinch_distance=pinch_dist,
+                pinch_distance=pinch_dist_2d,
                 control_active=self._control_active,
             )
 
-        # Map cursor position
+        # Map cursor position (常に計算するがNEUTRALでは適用しない)
         screen_pos = self._mapper.map(index_tip[0], index_tip[1])
 
         # State transitions
-        if self._state == GestureState.CURSOR:
+        if self._state == GestureState.NEUTRAL:
+            # クラッチ: 人差し指のみでカーソル移動開始
+            if config.CONTROL_CLUTCH_ENABLED:
+                if is_pointing:
+                    self._state = GestureState.CURSOR
+                    self._mapper.reset()
+                elif pinching:
+                    # NEUTRAL状態からのピンチ→カーソル位置を確定してクリック
+                    self._state = GestureState.CURSOR
+                    self._mapper.reset()
+                    screen_pos = self._mapper.map(index_tip[0], index_tip[1])
+                    self._enter_click_down(screen_pos)
+            else:
+                # クラッチ無効時は従来どおり即CURSOR
+                self._state = GestureState.CURSOR
+                self._mapper.reset()
+
+        elif self._state == GestureState.CURSOR:
             if pinching:
                 self._enter_click_down(screen_pos)
             elif is_scroll:
                 self._scroll_confirm_frames += 1
                 if self._scroll_confirm_frames >= config.CONTROL_GESTURE_CONFIRM_FRAMES:
                     self._enter_scrolling(landmarks)
+            elif config.CONTROL_CLUTCH_ENABLED and is_open:
+                # 手を開いたらNEUTRALに戻る（カーソル固定）
+                self._scroll_confirm_frames = 0
+                self._state = GestureState.NEUTRAL
             else:
                 self._scroll_confirm_frames = 0
-                self._move_cursor(screen_pos)
+                if is_pointing or not config.CONTROL_CLUTCH_ENABLED:
+                    self._move_cursor(screen_pos)
 
         elif self._state == GestureState.CLICK_DOWN:
             if not pinching:
@@ -395,7 +492,7 @@ class HandController:
             state=self._state,
             cursor_screen=screen_pos,
             index_tip_px=index_tip,
-            pinch_distance=pinch_dist,
+            pinch_distance=pinch_dist_2d,
             control_active=self._control_active,
         )
 
@@ -422,7 +519,8 @@ class HandController:
         if self._hand_lost_frames >= config.CONTROL_HAND_LOST_FRAMES:
             if self._state in (GestureState.DRAGGING, GestureState.CLICK_DOWN):
                 self._release_all()
-            self._state = GestureState.IDLE
+            if self._state != GestureState.IDLE:
+                self._state = GestureState.IDLE
             self._is_pinching = False
             self._scroll_prev_y = None
             self._scroll_confirm_frames = 0
