@@ -57,8 +57,8 @@ WINDOW_NAME: str = "RealSense Hand Control"
 CONTROL_ACTIVE_REGION: float = 0.7       # カメラ画面の中央何%を操作領域にするか
 CONTROL_SMOOTHING_ALPHA: float = 0.4     # EMA平滑化係数 (0=スムーズ, 1=即応)
 CONTROL_DEADZONE_PX: int = 2             # この画素数以下の移動は無視
-CONTROL_PINCH_THRESHOLD_PX: int = 30     # ピンチ検出閾値（ピクセル距離）
-CONTROL_PINCH_RELEASE_THRESHOLD_PX: int = 40  # ピンチ解除閾値（ヒステリシス）
+CONTROL_PINCH_THRESHOLD_PX: int = 45     # ピンチ検出閾値（ピクセル距離）
+CONTROL_PINCH_RELEASE_THRESHOLD_PX: int = 60  # ピンチ解除閾値（ヒステリシス）
 CONTROL_CLICK_MAX_DURATION_S: float = 0.3     # クリック判定の最大保持時間
 CONTROL_CLICK_MAX_MOVE_PX: int = 20      # クリック判定の最大移動量
 CONTROL_DRAG_MIN_HOLD_S: float = 0.25    # ドラッグ判定の最小保持時間
@@ -71,9 +71,9 @@ CONTROL_MIRROR_X: bool = True            # X軸ミラーリング
 CONTROL_CLUTCH_ENABLED: bool = True      # クラッチ方式を有効にする
 
 # 3Dピンチ検出（メートル単位）
-CONTROL_PINCH_THRESHOLD_3D_M: float = 0.025       # 25mm ピンチ検出
-CONTROL_PINCH_RELEASE_THRESHOLD_3D_M: float = 0.035  # 35mm ピンチ解除
-CONTROL_USE_3D_PINCH: bool = True        # 3Dデータがあれば3D距離を使用
+CONTROL_PINCH_THRESHOLD_3D_M: float = 0.040       # 40mm ピンチ検出
+CONTROL_PINCH_RELEASE_THRESHOLD_3D_M: float = 0.055  # 55mm ピンチ解除
+CONTROL_USE_3D_PINCH: bool = False       # 実機チューニング後にTrueにする
 
 # カーソルOne Euroフィルターパラメータ
 CURSOR_ONE_EURO_MIN_CUTOFF: float = 0.5

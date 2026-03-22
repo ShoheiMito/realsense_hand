@@ -122,6 +122,8 @@ class HandVisualizer:
         control_active: bool,
         index_tip_px: tuple[int, int] | None = None,
         pinch_distance: float = 0.0,
+        pinch_distance_3d: float | None = None,
+        is_pinching: bool = False,
     ) -> np.ndarray:
         """Draw gesture control status overlay.
 
@@ -131,6 +133,8 @@ class HandVisualizer:
             control_active: Whether mouse control is active.
             index_tip_px: Index finger tip pixel position for indicator.
             pinch_distance: Current pinch distance in pixels.
+            pinch_distance_3d: Current 3D pinch distance in metres, or None.
+            is_pinching: Whether a pinch is currently detected.
 
         Returns:
             New BGR image with the control overlay.
@@ -154,6 +158,14 @@ class HandVisualizer:
         y = th + 8
         cv2.putText(canvas, mode_label, (x + 1, y + 1), font, scale, (0, 0, 0), thick + 1, cv2.LINE_AA)
         cv2.putText(canvas, mode_label, (x, y), font, scale, mode_color, thick, cv2.LINE_AA)
+
+        # ピンチ距離デバッグ情報（左下）
+        pinch_color = (0, 0, 255) if is_pinching else (200, 200, 200)
+        pinch_label = f"2D:{pinch_distance:.0f}px"
+        if pinch_distance_3d is not None:
+            pinch_label += f" 3D:{pinch_distance_3d * 1000:.0f}mm"
+        cv2.putText(canvas, pinch_label, (10, h - 10), font, 0.45, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.putText(canvas, pinch_label, (10, h - 10), font, 0.45, pinch_color, 1, cv2.LINE_AA)
 
         # ジェスチャー状態テキスト（右下）
         state_color = _GESTURE_COLORS.get(gesture_state, (200, 200, 200))

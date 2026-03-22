@@ -54,6 +54,8 @@ class GestureInfo:
     cursor_screen: tuple[int, int] | None = None
     index_tip_px: tuple[int, int] | None = None
     pinch_distance: float = 0.0
+    pinch_distance_3d: float | None = None
+    is_pinching: bool = False
     control_active: bool = True
 
 
@@ -339,6 +341,7 @@ class HandController:
         self._hand_detected_frames: int = 0
         self._hand_lost_frames: int = 0
         self._scroll_confirm_frames: int = 0
+        self._open_hand_frames: int = 0
 
         # Click/drag state
         self._pinch_start_time: float = 0.0
@@ -400,11 +403,26 @@ class HandController:
                 pinching = pinch_dist_3d < config.CONTROL_PINCH_RELEASE_THRESHOLD_3D_M
             else:
                 pinching = pinch_dist_3d < config.CONTROL_PINCH_THRESHOLD_3D_M
+            logger.debug(
+                "Pinch 3D: %.1fmm thresh=%.0fmm pinching=%s",
+                pinch_dist_3d * 1000,
+                (config.CONTROL_PINCH_RELEASE_THRESHOLD_3D_M if self._is_pinching
+                 else config.CONTROL_PINCH_THRESHOLD_3D_M) * 1000,
+                pinching,
+            )
         else:
             if self._is_pinching:
                 pinching = pinch_dist_2d < config.CONTROL_PINCH_RELEASE_THRESHOLD_PX
             else:
                 pinching = pinch_dist_2d < config.CONTROL_PINCH_THRESHOLD_PX
+            logger.debug(
+                "Pinch 2D: %.1fpx thresh=%dpx pinching=%s state=%s",
+                pinch_dist_2d,
+                (config.CONTROL_PINCH_RELEASE_THRESHOLD_PX if self._is_pinching
+                 else config.CONTROL_PINCH_THRESHOLD_PX),
+                pinching,
+                self._state.value,
+            )
 
         # Debounce hand detection: IDLE → NEUTRAL
         if self._state == GestureState.IDLE:
@@ -414,6 +432,8 @@ class HandController:
                 state=self._state,
                 index_tip_px=index_tip,
                 pinch_distance=pinch_dist_2d,
+                pinch_distance_3d=pinch_dist_3d,
+                is_pinching=pinching,
                 control_active=self._control_active,
             )
 
@@ -445,12 +465,18 @@ class HandController:
                 self._scroll_confirm_frames += 1
                 if self._scroll_confirm_frames >= config.CONTROL_GESTURE_CONFIRM_FRAMES:
                     self._enter_scrolling(landmarks)
-            elif config.CONTROL_CLUTCH_ENABLED and is_open:
+            elif config.CONTROL_CLUTCH_ENABLED and is_open and not pinching:
                 # 手を開いたらNEUTRALに戻る（カーソル固定）
-                self._scroll_confirm_frames = 0
-                self._state = GestureState.NEUTRAL
+                # ピンチ準備動作で誤ってNEUTRALに落ちないよう、
+                # ピンチ中でないことを確認
+                self._open_hand_frames += 1
+                if self._open_hand_frames >= config.CONTROL_GESTURE_CONFIRM_FRAMES:
+                    self._scroll_confirm_frames = 0
+                    self._open_hand_frames = 0
+                    self._state = GestureState.NEUTRAL
             else:
                 self._scroll_confirm_frames = 0
+                self._open_hand_frames = 0
                 if is_pointing or not config.CONTROL_CLUTCH_ENABLED:
                     self._move_cursor(screen_pos)
 
@@ -458,7 +484,11 @@ class HandController:
             if not pinching:
                 # Pinch released — fire click
                 self._fire_click()
-                self._state = GestureState.CURSOR
+                # クラッチ有効時はNEUTRALに戻る（手を開いた状態に復帰）
+                if config.CONTROL_CLUTCH_ENABLED:
+                    self._state = GestureState.NEUTRAL
+                else:
+                    self._state = GestureState.CURSOR
             else:
                 elapsed = time.monotonic() - self._pinch_start_time
                 move_dist = math.sqrt(
@@ -474,7 +504,10 @@ class HandController:
         elif self._state == GestureState.DRAGGING:
             if not pinching:
                 self._release_drag()
-                self._state = GestureState.CURSOR
+                if config.CONTROL_CLUTCH_ENABLED:
+                    self._state = GestureState.NEUTRAL
+                else:
+                    self._state = GestureState.CURSOR
             else:
                 self._move_cursor(screen_pos)
 
@@ -493,6 +526,8 @@ class HandController:
             cursor_screen=screen_pos,
             index_tip_px=index_tip,
             pinch_distance=pinch_dist_2d,
+            pinch_distance_3d=pinch_dist_3d,
+            is_pinching=pinching,
             control_active=self._control_active,
         )
 

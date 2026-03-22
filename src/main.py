@@ -192,12 +192,17 @@ def main() -> None:
                 index_tip_px: tuple[int, int] | None = None
                 pinch_dist = 0.0
 
+                pinch_dist_3d: float | None = None
+                is_pinching = False
+
                 if controller is not None:
                     gesture_info = controller.update(result.hands)
                     gesture_state = gesture_info.state.value
                     control_active = gesture_info.control_active
                     index_tip_px = gesture_info.index_tip_px
                     pinch_dist = gesture_info.pinch_distance
+                    pinch_dist_3d = gesture_info.pinch_distance_3d
+                    is_pinching = gesture_info.is_pinching
 
                 # Control overlay
                 img = visualizer.draw_control_overlay(
@@ -206,6 +211,8 @@ def main() -> None:
                     control_active=control_active,
                     index_tip_px=index_tip_px,
                     pinch_distance=pinch_dist,
+                    pinch_distance_3d=pinch_dist_3d,
+                    is_pinching=is_pinching,
                 )
 
                 # FPS overlay

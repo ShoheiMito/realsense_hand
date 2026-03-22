@@ -42,10 +42,10 @@ def _make_open_hand(cx: int = 320, cy: int = 240) -> list[tuple[int, int]]:
     """
     return [
         (cx, cy + 80),       # 0: wrist
-        (cx - 30, cy + 50),  # 1: thumb_cmc
-        (cx - 45, cy + 20),  # 2: thumb_mcp
-        (cx - 55, cy - 10),  # 3: thumb_ip
-        (cx - 60, cy - 30),  # 4: thumb_tip
+        (cx - 40, cy + 50),  # 1: thumb_cmc
+        (cx - 60, cy + 20),  # 2: thumb_mcp
+        (cx - 75, cy - 10),  # 3: thumb_ip
+        (cx - 85, cy - 30),  # 4: thumb_tip (遠めに配置)
         (cx - 15, cy + 20),  # 5: index_mcp
         (cx - 15, cy - 10),  # 6: index_pip
         (cx - 15, cy - 30),  # 7: index_dip
@@ -351,10 +351,12 @@ class TestHandController:
         assert info.state == GestureState.CURSOR
 
     def test_cursor_to_neutral_on_open_hand(self, controller: HandController) -> None:
-        """Opening hand in CURSOR should transition back to NEUTRAL."""
+        """Opening hand in CURSOR for GESTURE_CONFIRM_FRAMES should go to NEUTRAL."""
         self._enter_cursor(controller)
         hand_open = _make_hand_result(_make_open_hand())
-        info = controller.update([hand_open])
+        # デバウンス: GESTURE_CONFIRM_FRAMES(3)フレーム必要
+        for _ in range(3):
+            info = controller.update([hand_open])
         assert info.state == GestureState.NEUTRAL
 
     def test_cursor_to_idle_on_hand_lost(self, controller: HandController) -> None:
@@ -375,9 +377,28 @@ class TestHandController:
         controller.update([hand_pinch])
         assert controller._state == GestureState.CLICK_DOWN
 
-        # Quick release (pointing hand = not pinching)
+        # Quick release — clutch mode returns to NEUTRAL
         controller.update([hand_point])
-        assert controller._state == GestureState.CURSOR
+        assert controller._state == GestureState.NEUTRAL
+        controller._mouse.click.assert_called()
+
+    def test_click_from_neutral_via_pinch(self, controller: HandController) -> None:
+        """Pinch directly from NEUTRAL should fire click on release."""
+        hand_open = _make_hand_result(_make_open_hand())
+        hand_pinch = _make_hand_result(_make_pinch_hand())
+
+        # IDLE → NEUTRAL
+        for _ in range(3):
+            controller.update([hand_open])
+        assert controller._state == GestureState.NEUTRAL
+
+        # Pinch from NEUTRAL → CLICK_DOWN
+        controller.update([hand_pinch])
+        assert controller._state == GestureState.CLICK_DOWN
+
+        # Release → NEUTRAL
+        controller.update([hand_open])
+        assert controller._state == GestureState.NEUTRAL
         controller._mouse.click.assert_called()
 
     def test_drag_on_sustained_pinch_with_movement(self, controller: HandController) -> None:
@@ -408,10 +429,10 @@ class TestHandController:
         controller.update([_make_hand_result(pinch2)])
         assert controller._state == GestureState.DRAGGING
 
-        # Release with pointing hand
-        hand_point = _make_hand_result(_make_pointing_hand())
-        controller.update([hand_point])
-        assert controller._state == GestureState.CURSOR
+        # Release — clutch mode returns to NEUTRAL
+        hand_open = _make_hand_result(_make_open_hand())
+        controller.update([hand_open])
+        assert controller._state == GestureState.NEUTRAL
         controller._mouse.release.assert_called()
 
     def test_scroll_on_two_finger_gesture(self, controller: HandController) -> None:
