@@ -189,19 +189,23 @@ class GestureDetector:
 
 
 class CoordinateMapper:
-    """Maps camera pixel coordinates to screen coordinates with One Euro smoothing."""
+    """Relative coordinate mapper: camera movement delta → cursor movement.
+
+    Works like a trackpad: hand movement is translated into cursor displacement,
+    not mapped to an absolute screen position.
+    """
 
     def __init__(
         self,
         camera_width: int = config.CAMERA_WIDTH,
         camera_height: int = config.CAMERA_HEIGHT,
-        active_region: float = config.CONTROL_ACTIVE_REGION,
+        sensitivity: float = config.CONTROL_SENSITIVITY,
         deadzone_px: int = config.CONTROL_DEADZONE_PX,
         mirror_x: bool = config.CONTROL_MIRROR_X,
     ) -> None:
         self.camera_width = camera_width
         self.camera_height = camera_height
-        self.active_region = active_region
+        self.sensitivity = sensitivity
         self.deadzone_px = deadzone_px
         self.mirror_x = mirror_x
 
@@ -219,7 +223,7 @@ class CoordinateMapper:
                 self.screen_width, self.screen_height,
             )
 
-        # One Euro filter state (replaces EMA)
+        # One Euro filter on camera input (smooth before delta calculation)
         self._filter_params = config.OneEuroFilterParams(
             min_cutoff=config.CURSOR_ONE_EURO_MIN_CUTOFF,
             beta=config.CURSOR_ONE_EURO_BETA,
@@ -227,22 +231,19 @@ class CoordinateMapper:
         )
         self._filter_x = OneEuroFilter(self._filter_params)
         self._filter_y = OneEuroFilter(self._filter_params)
-        self._prev_sx: float = self.screen_width / 2.0
-        self._prev_sy: float = self.screen_height / 2.0
-        self._initialized: bool = False
 
-        # Pre-compute active region bounds
-        margin_x = (1.0 - active_region) / 2.0 * camera_width
-        margin_y = (1.0 - active_region) / 2.0 * camera_height
-        self._min_x = margin_x
-        self._max_x = camera_width - margin_x
-        self._min_y = margin_y
-        self._max_y = camera_height - margin_y
+        # Previous smoothed camera position (for delta calculation)
+        self._prev_cam_x: float | None = None
+        self._prev_cam_y: float | None = None
+
+        # Current screen cursor position
+        self._cursor_x: float = self.screen_width / 2.0
+        self._cursor_y: float = self.screen_height / 2.0
 
     def map(
         self, cam_x: int, cam_y: int, timestamp: float | None = None,
     ) -> tuple[int, int]:
-        """Convert camera pixel position to smoothed screen coordinates.
+        """Convert camera movement delta to cursor displacement.
 
         Args:
             cam_x: X pixel in camera frame.
@@ -255,52 +256,64 @@ class CoordinateMapper:
         if timestamp is None:
             timestamp = time.monotonic()
 
-        # Clamp to active region
-        cx = max(self._min_x, min(self._max_x, float(cam_x)))
-        cy = max(self._min_y, min(self._max_y, float(cam_y)))
+        # One Euro smoothing on camera coordinates
+        smooth_x = self._filter_x(float(cam_x), timestamp)
+        smooth_y = self._filter_y(float(cam_y), timestamp)
 
-        # Normalize to [0, 1]
-        norm_x = (cx - self._min_x) / (self._max_x - self._min_x)
-        norm_y = (cy - self._min_y) / (self._max_y - self._min_y)
+        # First frame: initialize, no movement
+        if self._prev_cam_x is None or self._prev_cam_y is None:
+            self._prev_cam_x = smooth_x
+            self._prev_cam_y = smooth_y
+            return self.get_cursor_pos()
+
+        # Calculate camera delta
+        delta_cx = smooth_x - self._prev_cam_x
+        delta_cy = smooth_y - self._prev_cam_y
+        self._prev_cam_x = smooth_x
+        self._prev_cam_y = smooth_y
+
+        # Dead zone — ignore tiny camera movements
+        if abs(delta_cx) < self.deadzone_px and abs(delta_cy) < self.deadzone_px:
+            return self.get_cursor_pos()
 
         # Mirror X axis (camera is mirrored)
         if self.mirror_x:
-            norm_x = 1.0 - norm_x
+            delta_cx = -delta_cx
 
-        # Scale to screen
-        raw_sx = norm_x * self.screen_width
-        raw_sy = norm_y * self.screen_height
-
-        # One Euro smoothing (adaptive: fast move = less lag, slow move = more smooth)
-        sx = self._filter_x(raw_sx, timestamp)
-        sy = self._filter_y(raw_sy, timestamp)
-
-        if not self._initialized:
-            self._prev_sx = sx
-            self._prev_sy = sy
-            self._initialized = True
-
-        # Dead zone — don't move if delta is tiny
-        dx = abs(sx - self._prev_sx)
-        dy = abs(sy - self._prev_sy)
-        if dx < self.deadzone_px and dy < self.deadzone_px:
-            return (int(self._prev_sx), int(self._prev_sy))
-
-        self._prev_sx = sx
-        self._prev_sy = sy
+        # Apply sensitivity and move cursor
+        self._cursor_x += delta_cx * self.sensitivity
+        self._cursor_y += delta_cy * self.sensitivity
 
         # Clamp to screen bounds
-        final_x = max(0, min(self.screen_width - 1, int(sx)))
-        final_y = max(0, min(self.screen_height - 1, int(sy)))
-        return (final_x, final_y)
+        self._cursor_x = max(0.0, min(float(self.screen_width - 1), self._cursor_x))
+        self._cursor_y = max(0.0, min(float(self.screen_height - 1), self._cursor_y))
+
+        return self.get_cursor_pos()
+
+    def get_cursor_pos(self) -> tuple[int, int]:
+        """Return current cursor position without moving it."""
+        return (int(self._cursor_x), int(self._cursor_y))
+
+    def sync_cursor(self) -> None:
+        """Sync internal cursor position with actual mouse position."""
+        try:
+            user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+            from ctypes import wintypes
+
+            point = wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(point))
+            self._cursor_x = float(point.x)
+            self._cursor_y = float(point.y)
+        except Exception:
+            pass
 
     def reset(self) -> None:
-        """Reset filter state."""
+        """Reset filter state. Call when re-entering CURSOR mode."""
         self._filter_x = OneEuroFilter(self._filter_params)
         self._filter_y = OneEuroFilter(self._filter_params)
-        self._initialized = False
-        self._prev_sx = self.screen_width / 2.0
-        self._prev_sy = self.screen_height / 2.0
+        self._prev_cam_x = None
+        self._prev_cam_y = None
+        # カーソル位置はリセットしない（現在位置から継続）
 
 
 # ---------------------------------------------------------------------------
@@ -437,28 +450,26 @@ class HandController:
                 control_active=self._control_active,
             )
 
-        # Map cursor position (常に計算するがNEUTRALでは適用しない)
-        screen_pos = self._mapper.map(index_tip[0], index_tip[1])
-
         # State transitions
         if self._state == GestureState.NEUTRAL:
-            # クラッチ: 人差し指のみでカーソル移動開始
+            # NEUTRALではカーソルを動かさない
+            screen_pos = self._mapper.get_cursor_pos()
+
             if config.CONTROL_CLUTCH_ENABLED:
                 if is_pointing:
                     self._state = GestureState.CURSOR
                     self._mapper.reset()
+                    self._mapper.sync_cursor()
                 elif pinching:
-                    # NEUTRAL状態からのピンチ→カーソル位置を確定してクリック
-                    self._state = GestureState.CURSOR
-                    self._mapper.reset()
-                    screen_pos = self._mapper.map(index_tip[0], index_tip[1])
+                    # NEUTRALからのピンチ→カーソルはその場でクリック
                     self._enter_click_down(screen_pos)
             else:
-                # クラッチ無効時は従来どおり即CURSOR
                 self._state = GestureState.CURSOR
                 self._mapper.reset()
+                self._mapper.sync_cursor()
 
         elif self._state == GestureState.CURSOR:
+            screen_pos = self._mapper.map(index_tip[0], index_tip[1])
             if pinching:
                 self._enter_click_down(screen_pos)
             elif is_scroll:
@@ -466,9 +477,6 @@ class HandController:
                 if self._scroll_confirm_frames >= config.CONTROL_GESTURE_CONFIRM_FRAMES:
                     self._enter_scrolling(landmarks)
             elif config.CONTROL_CLUTCH_ENABLED and is_open and not pinching:
-                # 手を開いたらNEUTRALに戻る（カーソル固定）
-                # ピンチ準備動作で誤ってNEUTRALに落ちないよう、
-                # ピンチ中でないことを確認
                 self._open_hand_frames += 1
                 if self._open_hand_frames >= config.CONTROL_GESTURE_CONFIRM_FRAMES:
                     self._scroll_confirm_frames = 0
@@ -481,10 +489,9 @@ class HandController:
                     self._move_cursor(screen_pos)
 
         elif self._state == GestureState.CLICK_DOWN:
+            screen_pos = self._mapper.get_cursor_pos()
             if not pinching:
-                # Pinch released — fire click
                 self._fire_click()
-                # クラッチ有効時はNEUTRALに戻る（手を開いた状態に復帰）
                 if config.CONTROL_CLUTCH_ENABLED:
                     self._state = GestureState.NEUTRAL
                 else:
@@ -502,6 +509,7 @@ class HandController:
                     self._enter_dragging(screen_pos)
 
         elif self._state == GestureState.DRAGGING:
+            screen_pos = self._mapper.map(index_tip[0], index_tip[1])
             if not pinching:
                 self._release_drag()
                 if config.CONTROL_CLUTCH_ENABLED:
@@ -512,6 +520,7 @@ class HandController:
                 self._move_cursor(screen_pos)
 
         elif self._state == GestureState.SCROLLING:
+            screen_pos = self._mapper.get_cursor_pos()
             if not is_scroll:
                 self._scroll_confirm_frames = 0
                 self._scroll_prev_y = None

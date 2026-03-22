@@ -55,8 +55,8 @@ WINDOW_NAME: str = "RealSense Hand Control"
 # Hand controller settings
 # ---------------------------------------------------------------------------
 CONTROL_ACTIVE_REGION: float = 0.7       # カメラ画面の中央何%を操作領域にするか
-CONTROL_SMOOTHING_ALPHA: float = 0.4     # EMA平滑化係数 (0=スムーズ, 1=即応)
-CONTROL_DEADZONE_PX: int = 2             # この画素数以下の移動は無視
+CONTROL_SENSITIVITY: float = 2.5        # 相対カーソル感度（カメラ1px→画面何px）
+CONTROL_DEADZONE_PX: int = 2             # この画素数以下の移動は無視（カメラピクセル）
 CONTROL_PINCH_THRESHOLD_PX: int = 45     # ピンチ検出閾値（ピクセル距離）
 CONTROL_PINCH_RELEASE_THRESHOLD_PX: int = 60  # ピンチ解除閾値（ヒステリシス）
 CONTROL_CLICK_MAX_DURATION_S: float = 0.3     # クリック判定の最大保持時間

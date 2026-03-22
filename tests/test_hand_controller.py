@@ -222,7 +222,7 @@ class TestGestureDetector:
 
 
 class TestCoordinateMapper:
-    """Tests for camera-to-screen coordinate mapping."""
+    """Tests for relative coordinate mapping (trackpad-style)."""
 
     def _make_mapper(self, **kwargs: object) -> CoordinateMapper:
         """Create a mapper with mocked screen resolution."""
@@ -233,72 +233,64 @@ class TestCoordinateMapper:
             defaults = {
                 "camera_width": 640,
                 "camera_height": 480,
-                "active_region": 0.7,
+                "sensitivity": 2.5,
                 "deadzone_px": 0,
                 "mirror_x": False,
             }
             defaults.update(kwargs)
             return CoordinateMapper(**defaults)  # type: ignore[arg-type]
 
-    def test_center_maps_to_screen_center(self) -> None:
+    def test_first_frame_no_movement(self) -> None:
         mapper = self._make_mapper()
-        sx, sy = mapper.map(320, 240)
-        # Center of camera → center of screen (approximately)
-        assert abs(sx - 960) < 50
-        assert abs(sy - 540) < 50
+        # First frame initializes, cursor stays at center
+        pos = mapper.map(320, 240, timestamp=0.0)
+        assert pos == mapper.get_cursor_pos()
 
-    def test_active_region_boundary_maps_to_edge(self) -> None:
-        mapper = self._make_mapper()
-        # Left boundary of active region (0.15 * 640 = 96)
-        sx, _ = mapper.map(96, 240)
-        assert sx < 50  # Near left edge
+    def test_relative_movement(self) -> None:
+        mapper = self._make_mapper(sensitivity=1.0)
+        # Initialize
+        mapper.map(320, 240, timestamp=0.0)
+        initial_pos = mapper.get_cursor_pos()
+        # Move right by 10px in camera → cursor should move right
+        mapper.map(330, 240, timestamp=0.033)
+        new_pos = mapper.get_cursor_pos()
+        assert new_pos[0] > initial_pos[0]
 
-    def test_clamp_outside_active_region(self) -> None:
-        mapper = self._make_mapper()
-        # Far outside active region — should clamp
-        sx1, _ = mapper.map(0, 240)
-        sx2, _ = mapper.map(96, 240)
-        assert sx1 == sx2  # Both clamp to the same boundary
-
-    def test_mirror_x(self) -> None:
-        mapper_no_mirror = self._make_mapper(mirror_x=False)
-        mapper_mirror = self._make_mapper(mirror_x=True)
-
-        sx_no, _ = mapper_no_mirror.map(200, 240)
-        sx_yes, _ = mapper_mirror.map(200, 240)
-
-        # Mirrored should be on opposite side
-        assert sx_no < 960  # Left side without mirror
-        assert sx_yes > 960  # Right side with mirror
+    def test_mirror_x_reverses_direction(self) -> None:
+        mapper = self._make_mapper(mirror_x=True, sensitivity=1.0)
+        mapper.map(320, 240, timestamp=0.0)
+        initial_x = mapper.get_cursor_pos()[0]
+        # Move right in camera (positive delta)
+        mapper.map(330, 240, timestamp=0.033)
+        # Mirror: camera right → cursor left
+        assert mapper.get_cursor_pos()[0] < initial_x
 
     def test_deadzone_prevents_micro_movement(self) -> None:
-        mapper = self._make_mapper(deadzone_px=10)
-        pos1 = mapper.map(320, 240)
-        pos2 = mapper.map(321, 240)  # Very small movement
-        assert pos1 == pos2  # Should not change due to deadzone
+        mapper = self._make_mapper(deadzone_px=5, sensitivity=1.0)
+        mapper.map(320, 240, timestamp=0.0)
+        pos1 = mapper.get_cursor_pos()
+        # Move by 1px — within deadzone
+        mapper.map(321, 240, timestamp=0.033)
+        pos2 = mapper.get_cursor_pos()
+        assert pos1 == pos2
 
-    def test_one_euro_smoothing_reduces_jitter(self) -> None:
-        mapper = self._make_mapper(deadzone_px=0)
-        t = 0.0
-        # Initial position
-        mapper.map(320, 240, timestamp=t)
-        t += 0.033  # ~30fps
-        # Jump to a far position — One Euro should lag behind
-        sx, _ = mapper.map(500, 240, timestamp=t)
-        # With One Euro, smoothed position should not reach target immediately
-        mapper2 = self._make_mapper(deadzone_px=0)
-        # Feed same position repeatedly to converge
-        for i in range(30):
-            target_sx, _ = mapper2.map(500, 240, timestamp=i * 0.033)
-        # First frame after jump should be less than converged value
-        assert sx < target_sx
+    def test_clamp_to_screen_bounds(self) -> None:
+        mapper = self._make_mapper(sensitivity=100.0)
+        mapper.map(320, 240, timestamp=0.0)
+        # Large movement should clamp to screen edge
+        mapper.map(500, 240, timestamp=0.033)
+        pos = mapper.get_cursor_pos()
+        assert pos[0] <= 1919
 
-    def test_reset_clears_state(self) -> None:
-        mapper = self._make_mapper(deadzone_px=0)
-        mapper.map(100, 100)
+    def test_reset_preserves_cursor_position(self) -> None:
+        mapper = self._make_mapper(sensitivity=1.0)
+        mapper.map(320, 240, timestamp=0.0)
+        mapper.map(400, 300, timestamp=0.033)
+        pos_before = mapper.get_cursor_pos()
         mapper.reset()
-        # After reset, should act as fresh initialization
-        assert mapper._initialized is False
+        pos_after = mapper.get_cursor_pos()
+        # Reset should not change cursor position
+        assert pos_before == pos_after
 
 
 # ===========================================================================
